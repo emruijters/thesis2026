@@ -46,6 +46,12 @@ def simulate(net_content, usage, seed=420):
     # Surgeries are identified by the keys specified above
     usage_copy["surgery_id"] = usage_copy.groupby(Surgery_keys, dropna=False).ngroup() + 1
 
+    # Warning: tray content not available 
+    missing = set(usage_copy["net_definition"]) - set(net_cont_copy["net_definition"])
+    if missing:
+        print(f"WARNING: {len(missing)} tray(s) in Usage have no instruments in Net content "
+              f"and will be dropped: {sorted(missing)[:10]}")
+
     # Merge, every row one instrument 
     merged = usage_copy.merge(net_cont_copy, on="net_definition", how="inner")
 
@@ -86,12 +92,13 @@ if __name__ == "__main__":
     instances = run("data/historicData/synthetic_data.xlsx",
                     n_instances=10, base_seed=420)
 
+    # Save all instances 
     for i, df in instances.items():
         path = f"{outdir}/simulated_usage_seed420_instance{i:02d}.csv"
         df.to_csv(path, index=False)
         print(f"saved {path}  |  rows: {len(df)}  |  surgeries: {df.surgery_id.nunique()}  |  "
-              f"utilisation (opened trays): {df.loc[df.tray_opened==1, 'used'].mean():.3f}")
+              f"utilisation rate: {df.loc[df.tray_opened==1, 'used'].mean():.3f}")
         
         util_rate = df.loc[df.tray_opened == 1, 'used'].mean()
         if util_rate < 0.20 or util_rate > 0.30:
-            print("WARNING: Utilisation percentage does not match Deshpande")
+            print("WARNING: Utilisation rate does not match Deshpande.")
