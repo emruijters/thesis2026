@@ -11,8 +11,8 @@ import java.util.List;
 public class TrayInstanceTest {
 
     public static void main(String[] args) {
-        for (int i = 0; i < 10; i++) {
-            File fileToRead = new File("data/simulatedData/instance0" +  i + ".csv");
+        for (int i = 0; i < 1; i++) {
+            File fileToRead = new File("data/TreatmentCode/simulatedData/instance0" +  i + ".csv");
 
             try {
                 System.out.println("Reading file: " + fileToRead);
@@ -67,14 +67,13 @@ public class TrayInstanceTest {
             ex.printStackTrace();
             }
         }
-        //File fileToRead = new File("data/simulatedData/instance00.csv");
     }
 
     // Map a list of tray indices to their net_definition names.
     private static List<String> trayNames(TrayInstance instance, List<Integer> trayIndices) {
         List<String> names = new ArrayList<>();
         for (int t : trayIndices) {
-            names.add(instance.getTrays().get(t).netId);
+            names.add(instance.getTrays().get(t).netID);
         }
         return names;
     }

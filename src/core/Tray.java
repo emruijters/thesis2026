@@ -6,7 +6,8 @@ package core;
 public class Tray {
     
     public final int index;     
-    public final String netId; 
+    public final String netID; 
+    public final String netName;
     public final int[] composition; 
     public final int nCopies;   
  
@@ -17,9 +18,10 @@ public class Tray {
      * @param netId net definition
      * @param composition composition of the tray 
      */
-    public Tray(int index, String netId, int[] composition) {
+    public Tray(int index, String netID, String netName, int[] composition) {
         this.index = index;
-        this.netId = netId;
+        this.netID = netID;
+        this.netName = netName;
         this.composition = composition;
         int total = 0;
         for (int copy : composition) {

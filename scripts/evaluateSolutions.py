@@ -1,4 +1,5 @@
 import pandas as pd 
+import numpy as np
 import glob
 
 tray_instance = ["net_definition", "surgery_id"]
@@ -14,6 +15,15 @@ def compute_metrics(df: pd.DataFrame, surgery_type: str | None = None) -> dict |
         return None
     
     n_surgeries = df["surgery_id"].nunique()
+
+    # Check unique treatment_code, maybe drop all surgeries that don't have unique treatment_code?
+    """
+    print(f"Number of surgeries:  {n_surgeries}")
+    df_treatment = df[df["treatment_code"].notna()]
+    n_surgeries_treatmentcode = df_treatment["surgery_id"].nunique()
+    print(f"Number of surgeries with treatment code:  {n_surgeries_treatmentcode}")
+    """
+
     opened = df[df["tray_opened"] == 1]
 
     # Number of trays opened & trays per surgeries & instruments assigned per surgery 
@@ -41,12 +51,17 @@ def compute_metrics(df: pd.DataFrame, surgery_type: str | None = None) -> dict |
     overage = overage_total / n_surgeries if n_surgeries else 0.0     
     underage = underage_total / n_surgeries if n_surgeries else 0.0
 
-    # Number of unique trays and average number of instruments per tray 
+    # Tray composition statistics for table 2
     composition = df.drop_duplicates(["net_definition", "article_definition"])
     n_unique_trays = composition["net_definition"].nunique()
-    avg_instruments_per_tray = (
-        len(composition) / n_unique_trays if n_unique_trays else 0.0
-    )
+    n_unique_instruments = composition["article_definition"].nunique()
+ 
+    per_tray_counts = composition.groupby("net_definition").size()
+    avg_instruments_per_tray = per_tray_counts.mean() if n_unique_trays else 0.0
+    std_instruments_per_tray = per_tray_counts.std() if n_unique_trays else 0.0
+    min_instruments_per_tray = per_tray_counts.min() if n_unique_trays else 0
+    max_instruments_per_tray = per_tray_counts.max() if n_unique_trays else 0
+    p95_instruments_per_tray = per_tray_counts.quantile(0.95) if n_unique_trays else 0.0
 
     return {
         "surgery_type": surgery_type or "ALL",
@@ -64,7 +79,12 @@ def compute_metrics(df: pd.DataFrame, surgery_type: str | None = None) -> dict |
         "overage_total": overage_total,
         "underage_total": underage_total,
         "n_unique_trays": n_unique_trays,
+        "n_unique_instruments": n_unique_instruments,
         "avg_instruments_per_tray": avg_instruments_per_tray,
+        "std_instruments_per_tray": std_instruments_per_tray,
+        "min_instruments_per_tray": min_instruments_per_tray,
+        "max_instruments_per_tray": max_instruments_per_tray,
+        "p95_instruments_per_tray": p95_instruments_per_tray,
     }
 
 # Run the metrics over several instance files and report mean & std across them 
@@ -94,12 +114,75 @@ def format_results(m: dict) -> str:
         f"(total {m['overage_total']:.0f})\n"
         f"Underage (instr./surgery)        : {m['underage_per_surgery']:.2f}  "
         f"(total {m['underage_total']:.0f})\n"
-        f"Unique trays                     : {m['n_unique_trays']}\n"
-        f"Avg instruments / tray           : {m['avg_instruments_per_tray']:.2f}\n"
+        f"\n"
+        f"=== Table 2: Data Summary of Tray Composition ===\n"
+        f"Number of unique trays used                                : {m['n_unique_trays']}\n"
+        f"Number of unique instruments                                : {m['n_unique_instruments']}\n"
+        f"Average number of instruments in each tray                  : {m['avg_instruments_per_tray']:.2f}\n"
+        f"Standard deviation of the number of instruments per tray    : {m['std_instruments_per_tray']:.2f}\n"
+        f"Minimum number of instruments in each tray                  : {m['min_instruments_per_tray']}\n"
+        f"Maximum number of instruments in each tray                  : {m['max_instruments_per_tray']}\n"
+        f"95th percentile of the number of instruments in each tray   : {m['p95_instruments_per_tray']:.0f}\n"
     )
 
+def compute_table1_row_data(df: pd.DataFrame) -> pd.DataFrame:
+    out = []
+    for code, g in df.groupby("treatment_code", dropna=False):
+        n_surg = g["surgery_id"].nunique()
+        used_total = int(g["used"].sum())
+
+        # overage (Deshpande): per (surgery, instrument) slot, supply - used, clipped >= 0
+        supply = g.groupby(instrument_key).size().rename("supply")
+        used   = g.groupby(instrument_key)["used"].sum().rename("used")
+        pair   = pd.concat([supply, used], axis=1).fillna(0)
+        surplus = pair["supply"] - pair["used"]
+        overage_total = float(surplus.clip(lower=0).sum())
+
+        out.append({
+            "treatment_code": code,
+            "surgeries": n_surg,
+            "instruments_assigned_per_surgery": len(g) / n_surg if n_surg else 0.0,
+            "instruments_used_per_surgery": used_total / n_surg if n_surg else 0.0,
+            "overage_per_surgery": overage_total / n_surg if n_surg else 0.0,
+        })
+    return pd.DataFrame(out).set_index("treatment_code")
+
+
+def build_table1(paths) -> pd.DataFrame:
+    per_instance = [compute_table1_row_data(load_instance(p)) for p in paths]
+    codes = per_instance[0].index
+
+    surgeries = per_instance[0]["surgeries"]
+    assigned  = per_instance[0]["instruments_assigned_per_surgery"]
+
+    used_stack    = pd.concat([d["instruments_used_per_surgery"].rename(i)
+                               for i, d in enumerate(per_instance)], axis=1)
+    overage_stack = pd.concat([d["overage_per_surgery"].rename(i)
+                               for i, d in enumerate(per_instance)], axis=1)
+
+    table = pd.DataFrame({
+        "Surgeries": surgeries,
+        "Instruments assigned": assigned,
+        "Instruments used (mean)": used_stack.mean(axis=1),
+        "Instruments used (std)":  used_stack.std(axis=1),
+        "Overage (mean)": overage_stack.mean(axis=1),
+        "Overage (std)":  overage_stack.std(axis=1),
+    }).sort_values("Surgeries", ascending=False)
+
+    # Average row 
+    avg = pd.Series({
+        "Surgeries": np.nan,
+        "Instruments assigned": table["Instruments assigned"].mean(),
+        "Instruments used (mean)": table["Instruments used (mean)"].mean(),
+        "Instruments used (std)": np.nan,
+        "Overage (mean)": table["Overage (mean)"].mean(),
+        "Overage (std)": np.nan,
+    }, name="Average")
+
+    return pd.concat([table, avg.to_frame().T])
+
 if __name__ == "__main__":
-    csv_path = "data/simulatedData/instance00.csv"
+    csv_path = "data/TraysKnown/simulatedData/instance00.csv"
     # Evaluate specific surgery type; choose "None" to evaluate all surgery types
     surgery_type = None       
     
@@ -108,5 +191,12 @@ if __name__ == "__main__":
     print(format_results(compute_metrics(df, surgery_type)))
 
     # Aggregate over all simulated instances and take mean / std across them
-    paths = sorted(glob.glob("data/simulatedData/instance*.csv"))
+    paths = sorted(glob.glob("data/TraysKnown/simulatedData/instance*.csv"))
     print(aggregate_over_instances(paths, surgery_type))
+
+    # Deshpande-style Table 1 by treatment_code
+    print("\n=== Table 1: Surgeries, Instruments Assigned/Used and Overage by treatment_code ===")
+    pd.set_option("display.float_format", lambda x: f"{x:.2f}")
+    print(build_table1(paths).to_string(na_rep="—"))
+    
+    

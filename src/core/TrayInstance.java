@@ -5,9 +5,11 @@ import java.io.*;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Class that makes a TrayInstance for the surgical tray optimisation problem. 
@@ -20,12 +22,16 @@ public class TrayInstance {
 
     // usage[m][i] = u_{m,i}
     private final int[][] usage;
+
+    // U0_p, total usage per type
+    private double[] totalUsagePerType; 
     
     // S(p) 
     private final List<List<Integer>> surgeriesOfType; 
     private final int nSurgeryTypes; 
 
     private final String[] surgeryTypeCodes;
+    private final String[] surgeryTypeTreatments;
 
     /**
      * Constructor for TrayInstance. 
@@ -37,8 +43,9 @@ public class TrayInstance {
      * @param surgeriesOfType surgeries of various surgery types
      * @param nSurgeryTypes number of surgery types 
      * @param surgeryTypeCodes original treatment_code string per surgery type index
+     * @param surgeryTypeTreatments original treatment string per surgery type index
      */
-    public TrayInstance(List<Surgery> surgeries, List<Tray> trays, List<Instrument> instruments, int[][] usage, List<List<Integer>> surgeriesOfType, int nSurgeryTypes, String[] surgeryTypeCodes) {
+    public TrayInstance(List<Surgery> surgeries, List<Tray> trays, List<Instrument> instruments, int[][] usage, List<List<Integer>> surgeriesOfType, int nSurgeryTypes, String[] surgeryTypeCodes, String[] surgeryTypeTreatments) {
         this.surgeries = surgeries;
         this.trays = trays;
         this.instruments = instruments;
@@ -46,6 +53,7 @@ public class TrayInstance {
         this.surgeriesOfType = surgeriesOfType;
         this.nSurgeryTypes = nSurgeryTypes;
         this.surgeryTypeCodes = surgeryTypeCodes;
+        this.surgeryTypeTreatments = surgeryTypeTreatments;
     }
 
     // Get methods 
@@ -86,15 +94,94 @@ public class TrayInstance {
         return usage[m][i] > 0;
     }
 
+    public double getTotalUsage(int p) {
+        if (totalUsagePerType == null) {
+            int K = getNInstruments();
+            double[] u0 = new double[nSurgeryTypes];
+            for (int q = 0; q < nSurgeryTypes; q++) {
+                double sum = 0.0;
+                for (int m : surgeriesOfType.get(q)) {
+                    for (int i = 0; i < K; i++) sum += usage[m][i];
+                }
+                u0[q] = sum;
+            }
+            totalUsagePerType = u0;
+        }
+        return totalUsagePerType[p];
+    }
+
     // S(p) = { m : p(m) = p }
     public List<Integer> getSurgeriesOfType(int p) {
         return Collections.unmodifiableList(surgeriesOfType.get(p));
     }
 
-    // Get original treatment_code for surgery type
+    // Get original treatment_code for surgery type p
     public String getSurgeryTypeCode(int p) {
         return surgeryTypeCodes[p];
     }
+
+    // Get original treatment for surgery type p 
+    public String getSurgeryTypeTreatment(int p) {
+        return surgeryTypeTreatments[p];
+    }
+
+    // Flags instruments that were used in less than cutoff% of surgeries it was assigned to 
+    public Set<String> computeFlaggedArticles(double cutoff) {
+        int K = getNInstruments();
+        int[] assignedCount = new int[K];
+        int[] usedCount = new int[K];
+
+        for (Surgery s : surgeries) {
+            int m = s.index;
+
+            boolean[] assignedHere = new boolean[K];
+            for (int t : s.existingTrays) {
+                int[] comp = trays.get(t).composition;
+                for (int i = 0; i < K; i++) {
+                    if (comp[i] > 0) assignedHere[i] = true;
+                }
+            }
+
+            for (int i = 0; i < K; i++) {
+                if (assignedHere[i]) assignedCount[i]++;
+                if (usage[m][i] > 0) usedCount[i]++;
+            }
+        }
+
+        Set<String> flagged = new HashSet<>();
+        for (Instrument instr : instruments) {
+            int i = instr.index;
+            if (assignedCount[i] == 0) continue; // never assigned -> not meaningfully "flaggable"
+            double rate = (double) usedCount[i] / assignedCount[i];
+            if (rate < cutoff) {
+                flagged.add(instr.articleID);
+            }
+        }
+        return flagged;
+    }
+
+    // Compute Wmax_p = total underage per surgery type if instruments below a given cutoff point are removed 
+    public double[] computeUnderagePerType(Set<String> flaggedArticles) {
+        Set<Integer> flaggedIdx = new HashSet<>();
+        for (Instrument instr : instruments) {
+            if (flaggedArticles.contains(instr.articleID)) {
+                flaggedIdx.add(instr.index);
+            }
+        }
+
+        double[] underagePerType = new double[nSurgeryTypes];
+        for (int p = 0; p < nSurgeryTypes; p++) {
+            double total = 0.0;
+            for (int m : surgeriesOfType.get(p)) {
+                for (int i : flaggedIdx) {
+                    total += usage[m][i];
+                }
+            }
+            underagePerType[p] = total;
+        }
+        return underagePerType;
+    }
+
 
     /**
      * Construct a TrayInstance by reading from a CSV file.
@@ -119,6 +206,12 @@ public class TrayInstance {
         Map<Long, Boolean>    openedMap           = new HashMap<>();      
         Map<Integer, List<Integer>> traysSeen     = new LinkedHashMap<>();
  
+        // For writing the answers to a csv file 
+        Map<Integer, String> netNameOfTray       = new HashMap<>();   
+        Map<Integer, String> articleNameOfInstr  = new HashMap<>();   
+        Map<Integer, String> treatmentOfType     = new HashMap<>(); 
+
+
         try (BufferedReader br = new BufferedReader(new FileReader(instanceFileName))) {
             String line;
  
@@ -126,7 +219,8 @@ public class TrayInstance {
             line = br.readLine();
             if (line == null) {
                 return new TrayInstance(new ArrayList<>(), new ArrayList<>(),
-                        new ArrayList<>(), new int[0][0], new ArrayList<>(), 0, new String[0]);
+                        new ArrayList<>(), new int[0][0], new ArrayList<>(), 0,
+                        new String[0], new String[0]);   // NEW arg
             }
             
             Map<String, Integer> col = headerPositions(line);
@@ -139,6 +233,8 @@ public class TrayInstance {
             int cCluster = require(col, "cluster");
             int cType    = require(col, "treatment_code"); 
             int cTreatment = require(col, "treatment");
+            int cNetName = require(col, "net_name");       
+            int cArtName = require(col, "article_name");
 
             // Loop over all rows to obtain the triples.
             while ((line = br.readLine()) != null) {
@@ -158,6 +254,11 @@ public class TrayInstance {
                 int t = intern(trayIdx, c[cNet].trim());
                 int i = intern(instrumentIdx, c[cArticle].trim());
  
+
+                netNameOfTray.putIfAbsent(t, c[cNetName].trim());
+                articleNameOfInstr.putIfAbsent(i, c[cArtName].trim());
+                treatmentOfType.putIfAbsent(p, c[cTreatment].trim());
+
                 // p(m): each row of a surgery must carry the same surgery type.
                 Integer prev = typeOfSurgery.putIfAbsent(m, p);
                 if (prev != null && prev != p) {
@@ -205,7 +306,8 @@ public class TrayInstance {
         for (Map.Entry<String, Integer> e : instrumentIdx.entrySet()) {
             int i = e.getValue();
             int cluster = clusterOfInstrument.getOrDefault(i, -1);
-            instruments.add(new Instrument(i, e.getKey(), cluster));
+            instruments.add(new Instrument(i, e.getKey(),
+                    articleNameOfInstr.getOrDefault(i, ""), cluster));
         }
         instruments.sort(java.util.Comparator.comparingInt(x -> x.index));
  
@@ -222,7 +324,7 @@ public class TrayInstance {
         List<Tray> trays = new ArrayList<>(nTrays);
         for (Map.Entry<String, Integer> e : trayIdx.entrySet()) {
             int t = e.getValue();
-            trays.add(new Tray(t, e.getKey(), comp[t]));
+            trays.add(new Tray(t, e.getKey(), netNameOfTray.getOrDefault(t,""), comp[t]));
         }
         trays.sort(java.util.Comparator.comparingInt(x -> x.index));
  
@@ -271,9 +373,15 @@ public class TrayInstance {
             surgeryTypeCodes[e.getValue()] = e.getKey();
         }
 
+        // Get surgery type treatment 
+        String[] surgeryTypeTreatments = new String[nSurgeryTypes];
+        for (int p = 0; p < nSurgeryTypes; p++) {
+            surgeryTypeTreatments[p] = treatmentOfType.getOrDefault(p, "");
+        }
+
         // Create instance with the obtained information
         return new TrayInstance(surgeries, trays, instruments, usage,
-                surgeriesOfType, nSurgeryTypes, surgeryTypeCodes);
+                surgeriesOfType, nSurgeryTypes, surgeryTypeCodes, surgeryTypeTreatments);
     }
 
     // header / parsing helpers

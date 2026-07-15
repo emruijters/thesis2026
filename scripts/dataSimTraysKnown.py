@@ -62,79 +62,49 @@ def build(net_content, usage):
     missing_nets = set(usage_copy["net_definition"]) - set(net_cont_copy["net_definition"])
     if missing_nets:
         print(f"WARNING: {len(missing_nets)} tray(s) in Usage have no instruments in Net content: {sorted(missing_nets)[:10]}")
-        
-    # if tray content not matching, it is a single instrument tray. Account for those here by building synthetic tray definitions for single-instrument trays
+
+    # Check if an unknown net is a single known instrument; remove surgeries that have an unknown tray assigned
     single_instr_rows = []
     matched = []
-    unmatched = []
-    unknown_nets = []
+    bad_nets = []      
 
     for net_def in missing_nets:
+        usage_rows = usage_copy.loc[usage_copy["net_definition"] == net_def]
+        instrument_name = usage_rows["net_name"].iloc[0]   # assume net_name identifies the instrument
+        matches = net_cont_copy.loc[net_cont_copy["article_name"] == instrument_name]
 
-        usage_rows = usage_copy.loc[
-            usage_copy["net_definition"] == net_def
-        ]
-
-        # Assume net_name uniquely identifies the instrument
-        instrument_name = usage_rows["net_name"].iloc[0]
-
-        matches = net_cont_copy.loc[
-            net_cont_copy["article_name"] == instrument_name
-        ]
-
-        # Try to match with article_definition in Net content
         if len(matches) > 0:
-
-            # Take first matching instrument definition
+            # matched to an existing article -> keep as a synthetic single-instrument tray
             m = matches.iloc[0]
-
             single_instr_rows.append({
                 "net_definition": net_def,
                 "article_definition": m["article_definition"],
                 "article_name": m["article_name"]
             })
-
             matched.append(net_def)
-
         else:
-            # If no match is found, create "new" instrument with the net name
-            
-            # Two cases: it is an unknown net, or an unknown instrument
-            if instrument_name.upper().startswith("NET"):
-                # Net with its content unknown 
-                single_instr_rows.append({
-                    "net_definition": net_def,
-                    "article_definition": f"UNKNOWN_NET_{net_def}",
-                    "article_name": instrument_name
-                })
-                unknown_nets.append((net_def, instrument_name))
-            else:     
-                # Unknown single instrument 
-                single_instr_rows.append({
-                    "net_definition": net_def,
-                    "article_definition": f"SINGLE_{net_def}",
-                    "article_name": instrument_name
-                })
+            # cannot match (unknown net or unknown single instrument) -> mark for removal
+            bad_nets.append(net_def)
 
-                unmatched.append(net_def)
-
-    # Add synthetic trays
-    single_tray_ids = set(missing_nets)
+    # only matched trays become synthetic content; single-instrument trays are the matched ones
+    single_tray_ids = set(matched)
     if single_instr_rows:
         net_cont_copy = pd.concat([net_cont_copy, pd.DataFrame(single_instr_rows)],
                                   ignore_index=True)
     if matched:
         print(f"WARNING: {len(matched)} tray(s) identified as single-instrument trays and matched to an existing article in Net content.")
-    if unmatched:
-        print(f"WARNING: {len(unmatched)} tray(s) identified as single-instrument trays but could not be matched; synthetic instruments were created.")
-    if unknown_nets:
-        print(f"WARNING: {len(unknown_nets)} tray(s) recognised as full nets but missing from Net content.")
 
-        # Uncomment to see which nets are noted as unknown nets 
-        """
-        for net_def, name in unknown_nets:
-            print(f"   {net_def}  ->  {name}")
-            """
+    # Remove entire surgeries that contain any unmatchable tray, so only surgeries
+    # whose trays all have known content remain.
+    surgeries_to_drop = set(
+        usage_copy.loc[usage_copy["net_definition"].isin(bad_nets), "surgery_id"]
+    )
+    if bad_nets:
+        n_before = usage_copy["surgery_id"].nunique()
+        usage_copy = usage_copy.loc[~usage_copy["surgery_id"].isin(surgeries_to_drop)].copy()
+        n_after = usage_copy["surgery_id"].nunique()
+        print(f"WARNING: removed {len(surgeries_to_drop)} surgery(ies) containing "
+              f"{len(bad_nets)} unmatchable tray(s); {n_before} -> {n_after} surgeries remain.")
 
     # The merge skeleton: one row per (instrument, surgery)
     merged = usage_copy.merge(net_cont_copy, on="net_definition", how="inner")
@@ -206,7 +176,7 @@ def run(excel_path, n_instances=1, base_seed=0,
 
 ##### Main #####
 if __name__ == "__main__":
-    outdir = "data/TreatmentCode/simulatedData"   
+    outdir = "data/TraysKnown/simulatedData"   
 
     instances = run("data/historicData/EMC_data.xlsx",
                     n_instances=10, base_seed=420)
